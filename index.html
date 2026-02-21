@@ -19,24 +19,44 @@ button {
 </head>
 
 <body>
-
 <h1>Backend Sound Trigger</h1>
-
 <button onclick="playSound()">Play Note</button>
 
 <script>
-const backendURL = "https://9vnf4tgv-5000.usw3.devtunnels.ms";
+async function playSound() {
+    // Tell the backend a button was pressed
+    try {
+        const res = await fetch("https://9vnf4tgv-5000.usw3.devtunnels.ms/play", {
+            method: "POST"
+        });
+        const data = await res.json();
+        console.log(data);
+    } catch (err) {
+        console.error("Backend request failed:", err);
+    }
 
-function playSound() {
-  fetch(`${backendURL}/play`, {
-    method: "POST"
-  })
-  .then(res => res.json())
-  .then(data => console.log(data))
-  .catch(err => console.error("Error connecting to backend:", err));
+    // Play the satisfying sound locally on the client
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const notes = [
+        {freq: 523, dur: 0.07},  // C5
+        {freq: 659, dur: 0.07},  // E5
+        {freq: 784, dur: 0.09},  // G5
+        {freq: 1046, dur: 0.14}  // C6
+    ];
+
+    let currentTime = ctx.currentTime;
+
+    notes.forEach(n => {
+        const o = ctx.createOscillator();
+        o.type = "sine";
+        o.frequency.setValueAtTime(n.freq, currentTime);
+        o.connect(ctx.destination);
+        o.start(currentTime);
+        o.stop(currentTime + n.dur);
+        currentTime += n.dur + 0.01; // add a tiny gap
+    });
 }
 </script>
 
 </body>
 </html>
-
