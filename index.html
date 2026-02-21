@@ -20,20 +20,23 @@ button {
 
 <body>
 
-  
 <h1>Backend Sound Trigger</h1>
 
 <button onclick="playSound()">Play Note</button>
 
 <script>
+const backendURL = "https://9vnf4tgv-5000.usw3.devtunnels.ms";
+
 function playSound() {
-  fetch("http://localhost:5000/play", {
+  fetch(`${backendURL}/play`, {
     method: "POST"
   })
   .then(res => res.json())
-  .then(data => console.log(data));
+  .then(data => console.log(data))
+  .catch(err => console.error("Error connecting to backend:", err));
 }
 </script>
 
 </body>
 </html>
+
