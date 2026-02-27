@@ -1,61 +1,272 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-<title>Sound Button</title>
-<style>
-body {
-  background: #111;
-  color: white;
-  text-align: center;
-  margin-top: 100px;
-  font-family: sans-serif;
-}
-button {
-  font-size: 24px;
-  padding: 20px 40px;
-  cursor: pointer;
-}
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Remote Desktop</title>
+  <style>
+    html, body { margin:0; height:100%; background:black; overflow:hidden; }
+    #bar {
+      position: fixed; top: 10px; left: 10px; right: 10px;
+      display:flex; gap:10px; z-index:10;
+      align-items:center;
+    }
+    #backend { flex: 1; padding: 10px; border-radius: 10px; border: 0; }
+    #token { width: 180px; padding: 10px; border-radius: 10px; border: 0; }
+    button { padding:10px 12px; border-radius:10px; border:0; cursor:pointer; }
+    video {
+      width: 100vw; height: 100vh;
+      object-fit: contain;
+      touch-action: none;
+      transform-origin: center center;
+    }
+    #keyboard {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      height: 35%;
+      display: none;
+      padding: 10px;
+      font-size: 18px;
+      border: 0;
+      outline: none;
+      border-radius: 14px 14px 0 0;
+    }
+    #status {
+      position: fixed; bottom: 10px; left: 10px;
+      color: #ddd; font-family: system-ui, sans-serif; font-size: 14px;
+      background: rgba(0,0,0,.45); padding: 6px 10px; border-radius: 10px;
+      z-index: 10;
+    }
+  </style>
 </head>
-
 <body>
-<h1>Backend Sound Trigger</h1>
-<button onclick="playSound()">Play Note</button>
+  <div id="bar">
+    <input id="backend" placeholder="Backend URL (ex: https://YOUR_DOMAIN:8080)" />
+    <input id="token" placeholder="Token (optional)" />
+    <button id="connect">Connect</button>
+    <button id="orient">Orientation</button>
+    <button id="kbd">Keyboard</button>
+  </div>
+
+  <video id="screen" autoplay playsinline></video>
+  <textarea id="keyboard" placeholder="Type here..."></textarea>
+  <div id="status">idle</div>
 
 <script>
-async function playSound() {
-    // Tell the backend a button was pressed
-    try {
-        const res = await fetch("https://9vnf4tgv-5000.usw3.devtunnels.ms/play", {
-            method: "POST"
-        });
-        const data = await res.json();
-        console.log(data);
-    } catch (err) {
-        console.error("Backend request failed:", err);
+  const video = document.getElementById("screen");
+  const statusEl = document.getElementById("status");
+  const backendEl = document.getElementById("backend");
+  const tokenEl = document.getElementById("token");
+  const keyboard = document.getElementById("keyboard");
+
+  let pc = null;
+  let dc = null;
+
+  function setStatus(s){ statusEl.textContent = s; }
+
+  // --- Helpers: wait for ICE gather (non-trickle) ---
+  function waitIceComplete(peer){
+    if (peer.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise(resolve => {
+      const check = () => {
+        if (peer.iceGatheringState === "complete") {
+          peer.removeEventListener("icegatheringstatechange", check);
+          resolve();
+        }
+      };
+      peer.addEventListener("icegatheringstatechange", check);
+    });
+  }
+
+  // --- Zoom/pan like your original ---
+  let mode = null;
+  let startTouches = [];
+  let startScale = 1, startOffsetX = 0, startOffsetY = 0;
+  let scale = 1, offsetX = 0, offsetY = 0;
+
+  function applyTransform(){
+    video.style.transform = `translate(${offsetX}px,${offsetY}px) scale(${scale})`;
+  }
+
+  // --- Click / rightclick (touch long-press) ---
+  let pressTimer = null;
+  let pressPoint = null;
+
+  function startPressTimer(touch){
+    pressPoint = {x: touch.clientX, y: touch.clientY};
+    pressTimer = setTimeout(() => {
+      sendClick(pressPoint, true); // long press => right click
+      pressPoint = null;
+    }, 600);
+  }
+
+  function clearPressTimer(){ clearTimeout(pressTimer); }
+
+  function triggerClick(){
+    if (pressPoint){
+      sendClick(pressPoint, false);
+      pressPoint = null;
+    }
+  }
+
+  function sendClick(pos, right){
+    if (!dc) return;
+    const rect = video.getBoundingClientRect();
+    const x = (pos.x - rect.left) / rect.width;
+    const y = (pos.y - rect.top) / rect.height;
+    dc.send(JSON.stringify({type: right ? "rightclick" : "click", x, y}));
+  }
+
+  // Touch controls
+  video.addEventListener("touchstart", e => {
+    if (!dc) return;
+    if (e.touches.length === 2){
+      mode = "viewport";
+      startTouches = [...e.touches];
+      startScale = scale;
+      startOffsetX = offsetX;
+      startOffsetY = offsetY;
+      clearPressTimer();
+    } else if (e.touches.length === 1){
+      mode = "click";
+      startPressTimer(e.touches[0]);
+    }
+  }, {passive:false});
+
+  video.addEventListener("touchmove", e => {
+    if (mode !== "viewport" || e.touches.length !== 2) return;
+
+    let dx0 = startTouches[0].clientX - startTouches[1].clientX;
+    let dy0 = startTouches[0].clientY - startTouches[1].clientY;
+    let dx1 = e.touches[0].clientX - e.touches[1].clientX;
+    let dy1 = e.touches[0].clientY - e.touches[1].clientY;
+    let d0 = Math.hypot(dx0, dy0);
+    let d1 = Math.hypot(dx1, dy1);
+
+    let newScale = startScale * (d1/d0);
+    newScale = Math.max(0.5, Math.min(4, newScale));
+    scale = newScale;
+
+    let cx = (e.touches[0].clientX + e.touches[1].clientX)/2;
+    let cy = (e.touches[0].clientY + e.touches[1].clientY)/2;
+    offsetX = cx - (cx - startOffsetX)*(scale/startScale);
+    offsetY = cy - (cy - startOffsetY)*(scale/startScale);
+
+    applyTransform();
+    e.preventDefault();
+  }, {passive:false});
+
+  video.addEventListener("touchend", e => {
+    if (mode === "click") triggerClick();
+    mode = null;
+    clearPressTimer();
+  });
+
+  // Desktop mouse click support (left click). Right-click uses contextmenu.
+  video.addEventListener("click", e => sendClick({x:e.clientX,y:e.clientY}, false));
+  video.addEventListener("contextmenu", e => { e.preventDefault(); sendClick({x:e.clientX,y:e.clientY}, true); });
+
+  // Orientation button (simple: reset zoom/pan)
+  document.getElementById("orient").onclick = () => {
+    scale = 1; offsetX = 0; offsetY = 0;
+    applyTransform();
+  };
+
+  // Keyboard toggle + input
+  document.getElementById("kbd").onclick = () => {
+    keyboard.style.display = (keyboard.style.display === "none" || !keyboard.style.display) ? "block" : "none";
+    if (keyboard.style.display === "block") keyboard.focus();
+  };
+
+  keyboard.addEventListener("input", e => {
+    if (!dc) return;
+    if (e.target.value){
+      dc.send(JSON.stringify({type:"key", key:e.target.value}));
+      e.target.value = "";
+    }
+  });
+
+  keyboard.addEventListener("keydown", e => {
+    if (!dc) return;
+    const map = {
+      Backspace:"backspace",
+      Enter:"enter",
+      Tab:"tab",
+      Escape:"esc",
+      ArrowUp:"up",
+      ArrowDown:"down",
+      ArrowLeft:"left",
+      ArrowRight:"right"
+    };
+    if (map[e.key]){
+      e.preventDefault();
+      dc.send(JSON.stringify({type:"special", key:map[e.key]}));
+    }
+  });
+
+  async function connect(){
+    const backend = backendEl.value.trim().replace(/\/$/, "");
+    const token = tokenEl.value.trim();
+
+    if (!backend) throw new Error("Enter your backend URL.");
+
+    setStatus("connecting...");
+
+    // STUN helps a bit; TURN may be needed on some networks.
+    pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    });
+
+    pc.addTransceiver("video", {direction:"recvonly"});
+    dc = pc.createDataChannel("input");
+
+    pc.ontrack = e => { video.srcObject = e.streams[0]; };
+
+    pc.onconnectionstatechange = () => setStatus("conn: " + pc.connectionState);
+    pc.oniceconnectionstatechange = () => setStatus("ice: " + pc.iceConnectionState);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitIceComplete(pc);
+
+    const res = await fetch(backend + "/offer", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        sdp: pc.localDescription.sdp,
+        type: pc.localDescription.type,
+        token: token || null
+      })
+    });
+
+    if (!res.ok){
+      const txt = await res.text();
+      throw new Error(`Backend error ${res.status}: ${txt}`);
     }
 
-    // Play the satisfying sound locally on the client
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const notes = [
-        {freq: 523, dur: 0.07},  // C5
-        {freq: 659, dur: 0.07},  // E5
-        {freq: 784, dur: 0.09},  // G5
-        {freq: 1046, dur: 0.14}  // C6
-    ];
+    const answer = await res.json();
+    await pc.setRemoteDescription(answer);
 
-    let currentTime = ctx.currentTime;
+    setStatus("connected");
+  }
 
-    notes.forEach(n => {
-        const o = ctx.createOscillator();
-        o.type = "sine";
-        o.frequency.setValueAtTime(n.freq, currentTime);
-        o.connect(ctx.destination);
-        o.start(currentTime);
-        o.stop(currentTime + n.dur);
-        currentTime += n.dur + 0.01; // add a tiny gap
-    });
-}
+  document.getElementById("connect").onclick = async () => {
+    try{
+      await connect();
+      document.getElementById("connect").disabled = true;
+      backendEl.disabled = true;
+    } catch(e){
+      alert(e.message || String(e));
+      setStatus("error");
+    }
+  };
+
+  // Convenience: support ?backend=...&token=...
+  const params = new URLSearchParams(location.search);
+  if (params.get("backend")) backendEl.value = params.get("backend");
+  if (params.get("token")) tokenEl.value = params.get("token");
+</script>
+</body>
+</html>
 </script>
 
 </body>
